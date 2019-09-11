@@ -35,16 +35,13 @@ redisConnection.set(lockKey, NX , PX, expireMsecs)
 ```
     public boolean tryLock() {
         long waitMillis = timeoutMsecs;
-	value = UUID.randomUUID().toString();
+        value = UUID.randomUUID().toString();
         while (waitMillis >= 0) {
             long startNanoTime = System.nanoTime();
-	    // 尝试获取锁
             String lockResult = setNx();
             locked = OK.equals(lockResult);
-	    // 获取到锁或者等待时间为0直接返回结果
             if (locked || waitMillis == 0) return locked;
             int sleepMillis = new Random().nextInt(100);
-	    // 没获取到锁，sleep一会儿
             sleep(sleepMillis);
             long escapedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanoTime);
             waitMillis = waitMillis - escapedMillis;
@@ -71,3 +68,80 @@ if redis.call("get",KEYS[1]) == ARGV[1] then
     end
 ```
 ### 一些细节
+#### 时钟
+细心的同学可能会发现在实现重试的时候使用的时间API为System.nanoTime()，它和我们常用的System.currentTimeMillis()有什么区别呢？
+##### 单调钟与时钟
+现代计算机至少有两种不同的时钟：时钟和单调钟。尽管它们都衡量时间，但区分这两者很重要，因为它们有不同的目的。
+##### 时钟
+ 时钟是您直观地了解时钟的依据：它根据某个日历（也称为挂钟时间（wall-clock time））返回当前日期和时间。例如，Linux上的clock_gettime(CLOCK_REALTIME)和Java中的System.currentTimeMillis()返回自epoch（1970年1月1日 午夜 UTC，格里高利历）以来的秒数（或毫秒），根据公历日历，不包括闰秒。有些系统使用其他日期作为参考点。
+时钟通常与NTP同步，这意味着来自一台机器的时间戳（理想情况下）意味着与另一台机器上的时间戳相同。但是如下节所述，时钟也具有各种各样的奇特之处。特别是，如果本地时钟在NTP服务器之前太远，则它可能会被强制重置，看上去好像跳回了先前的时间点。这些跳跃以及他们经常忽略闰秒的事实，使时钟不能用于测量经过时间。
+##### 单调钟
+单调钟适用于测量持续时间（时间间隔），例如超时或服务的响应时间：Linux上的clock_gettime(CLOCK_MONOTONIC)，和Java中的System.nanoTime()都是单调时钟。这个名字来源于他们保证总是前进的事实（而时钟可以及时跳回）。
+你可以在某个时间点检查单调钟的值，做一些事情，且稍后再次检查它。这两个值之间的差异告诉你两次检查之间经过了多长时间。但单调钟的绝对值是毫无意义的：它可能是计算机启动以来的纳秒数，或类似的任意值。特别是比较来自两台不同计算机的单调钟的值是没有意义的，因为它们并不是一回事。
+#### 简化使用
+##### 在Java的互斥锁中有着这样一个强制规范：
+在使用阻塞等待获取锁的方式中，必须在try代码块之外，并且在加锁方法与try代码块之间没有任何可能抛出异常的方法调用，避免加锁成功后，在finally中无法解锁。
+* 说明一：如果在lock方法与try代码块之间的方法调用抛出异常，那么无法解锁，造成其它线程无法成功获取锁。
+* 说明二：如果lock方法在try代码块之内，可能由于其它方法抛出异常，导致在finally代码块中，unlock对未加锁的对象解锁，它会调用AQS的tryRelease方法（取决于具体实现类），抛出IllegalMonitorStateException异常。
+* 说明三：在Lock对象的lock方法实现中可能抛出unchecked异常，产生的后果与说明二相同。
+
+###### 正例：
+
+```
+Lock lock = new XxxLock();
+// ...
+lock.lock();
+try {
+    doSomething();
+    doOthers();
+} finally {
+    lock.unlock();
+}
+```
+###### 反例：
+
+```
+Lock lock = new XxxLock();
+// ...
+try {
+    // 如果此处抛出异常，则直接执行finally代码块
+    doSomething();
+    // 无论加锁是否成功，finally代码块都会执行
+    lock.lock();
+    doOthers();
+
+} finally {
+    lock.unlock();
+}
+```
+同样的问题放在RedisLock这里也是存在的，比如在未获取锁的时候就去解锁，虽然RedisLock不会报错，但是也会增加一次Redis访问。尽管如此，通过一些改造，RedisLock能改进一些使用的体验。
+##### 加锁
+RedisLock加锁不同于Java的内置锁，会出现很多种异常，如果我们期望在外部捕获，由于lock()不能写在try finnaly块中，那么我们需要在写一层try catch，实在过于冗余。
+首先我们期望捕获异常主要是为了打印异常，否则的话直接把异常抛出去即可，也不用专门try catch了，对于这点可以在RedisLock加锁的逻辑中打印日志。
+每次都要try finnaly，能不能简介优雅一些。
+使用Java 7提供的try witch resource可以使得操作更加简洁
+
+```
+try(Lock lock = new RedisLock()) {
+
+}
+```
+想要RedisLock支持该特性只需要实现AutoCloseable接口
+看起来是不是很好用，但是我们好像疏忽了一点
+使用try witch resource会导致不管有没有或者到锁都会调用unlock方法
+##### 解锁
+所幸我们实现的RedisLock和Java中提供的锁有两个本质区别：
+1.Java中提供的锁无法修改代码
+2.Java中的锁在内存中是多线程访问的，而RedisLock是局部变量（RedisLock只是Client，真正的锁在Redis）
+因此我们可以在RedisLock中增加一个变量记录是否加锁成功，如果未加锁成功调用解锁方法就直接return了
+
+```
+   public void unlock() {
+        if (!locked) return;
+        RedisCommands<String, String> redisCommands = RedisConnections.getConnection(6).sync();
+        Object result = redisCommands.eval(UNLOCK_SCRIPT, ScriptOutputType.INTEGER, new String[]{lockKey}, value);
+        if (CastUtil.castInt(result) < 0) {
+        }
+        locked = false;
+    }
+```
