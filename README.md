@@ -35,16 +35,16 @@ redisConnection.set(lockKey, NX , PX, expireMsecs)
 ```
     public boolean tryLock() {
         long waitMillis = timeoutMsecs;
-		    value = UUID.randomUUID().toString();
+		value = UUID.randomUUID().toString();
         while (waitMillis >= 0) {
             long startNanoTime = System.nanoTime();
-			      // 尝试获取锁
+			// 尝试获取锁
             String lockResult = setNx();
             locked = OK.equals(lockResult);
-			      // 获取到锁或者等待时间为0直接返回结果
+			// 获取到锁或者等待时间为0直接返回结果
             if (locked || waitMillis == 0) return locked;
             int sleepMillis = new Random().nextInt(100);
-			      // 没获取到锁，sleep一会儿
+			// 没获取到锁，sleep一会儿
             sleep(sleepMillis);
             long escapedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanoTime);
             waitMillis = waitMillis - escapedMillis;
