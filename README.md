@@ -121,11 +121,15 @@ try {
 }
 ```
 在使用尝试机制来获取锁的方式中，进入业务代码块之前，必须先判断当前线程是否持有锁。锁的释放规则与锁的阻塞等待方式相同。
+
 说明：Lock对象的unlock方法在执行时，它会调用AQS的tryRelease方法（取决于具体实现类），如果当前线程不持有锁，则抛出IllegalMonitorStateException异常。
+
 同样的问题放在RedisLock这里也是存在的，比如在未获取锁的时候就去解锁，虽然RedisLock不会报错，但是也会增加一次Redis访问。尽管如此，通过一些改造，RedisLock能改进一些使用的体验。
 ##### 加锁
 RedisLock加锁不同于Java的内置锁，会出现很多种异常，如果我们期望在外部捕获，由于lock()不能写在try finnaly块中，那么我们需要在写一层try catch，实在过于冗余。
+
 如果能lock能写在try块里或者try finally能够简洁优雅一些就好了
+
 使用Java 7提供的try witch resource可以使得操作更加简洁
 
 ```
@@ -134,8 +138,11 @@ try(Lock lock = new RedisLock()) {
 }
 ```
 想要RedisLock支持该特性只需要实现AutoCloseable接口
+
 看起来是不是很好用，但是我们好像疏忽了一点
+
 使用try witch resource会导致不管有没有或者到锁都会调用unlock方法
+
 ##### 解锁
 所幸我们实现的RedisLock和Java中提供的锁有两个本质区别：
 1. Java中提供的锁无法修改代码
@@ -159,9 +166,14 @@ try(Lock lock = new RedisLock()) {
 2. Master宕机了，存储锁的key还没有来得及同步到Slave上。
 3. Slave升级为Master。
 4. 客户端2从新的Master获取到了对应同一个资源的锁。
+
 于是，客户端1和客户端2同时持有了同一个资源的锁。锁的安全性被打破。
+
 针对这个问题，Redis的作者antirez设计了Redlock算法。
+
 Redlock的算法描述就放在Redis的官网上：https://redis.io/topics/distlock
+
 关于这个算法的可靠性，也产生了一场争论，大家对RedLock感兴趣可以看下以下文章：
+
 * [基于Redis的分布式锁到底安全吗（上）？](http://zhangtielei.com/posts/blog-redlock-reasoning.html)
 * [基于Redis的分布式锁到底安全吗（下）？](http://zhangtielei.com/posts/blog-redlock-reasoning-part2.html)
