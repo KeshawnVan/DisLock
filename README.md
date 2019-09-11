@@ -117,8 +117,7 @@ try {
 同样的问题放在RedisLock这里也是存在的，比如在未获取锁的时候就去解锁，虽然RedisLock不会报错，但是也会增加一次Redis访问。尽管如此，通过一些改造，RedisLock能改进一些使用的体验。
 ##### 加锁
 RedisLock加锁不同于Java的内置锁，会出现很多种异常，如果我们期望在外部捕获，由于lock()不能写在try finnaly块中，那么我们需要在写一层try catch，实在过于冗余。
-首先我们期望捕获异常主要是为了打印异常，否则的话直接把异常抛出去即可，也不用专门try catch了，对于这点可以在RedisLock加锁的逻辑中打印日志。
-每次都要try finnaly，能不能简介优雅一些。
+如果能lock能写在try块里或者try finally能够简洁优雅一些就好了
 使用Java 7提供的try witch resource可以使得操作更加简洁
 
 ```
