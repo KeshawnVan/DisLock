@@ -22,3 +22,52 @@ Redis提供多种序列化方式，虽然仍然不能保证数据完全不会丢
 * 基于内存
 * 很少有耗时操作
 * 多路复用
+
+### 实现加锁
+用Redis来实现分布式锁最简单的方式就是在实例里创建一个键值（对于已经存在的键值再次声明返回失败），创建出来的键值一般都是有一个超时时间的（这个是Redis自带的超时特性），所以每个锁最终都会释放。
+#### 最简单的加锁实现：
+
+```
+redisConnection.set(lockKey, NX , PX, expireMsecs)
+```
+#### 加入获取锁的重试逻辑（在有限的等待时间内重试几次）：
+
+```
+    public boolean tryLock() {
+        long waitMillis = timeoutMsecs;
+		    value = UUID.randomUUID().toString();
+        while (waitMillis >= 0) {
+            long startNanoTime = System.nanoTime();
+			      // 尝试获取锁
+            String lockResult = setNx();
+            locked = OK.equals(lockResult);
+			      // 获取到锁或者等待时间为0直接返回结果
+            if (locked || waitMillis == 0) return locked;
+            int sleepMillis = new Random().nextInt(100);
+			      // 没获取到锁，sleep一会儿
+            sleep(sleepMillis);
+            long escapedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanoTime);
+            waitMillis = waitMillis - escapedMillis;
+        }
+        return false;
+    }
+```
+### 实现解锁
+解锁是一个看似简单的操作，但是如果考虑不周也会存在很多问题
+#### 最简单的方案：直接del对应的key
+这个方案有什么问题呢？
+假如线程A持有了锁，设置了超时时间为1秒，由于GC等各种原因当代码执行到unlock的时候，A的锁已经超时，并且此时该锁已经被B拿到，如果此时A直接delete对应的key，那么就会导致B的锁失效。此时假如有新的线程访问同一个锁，就无法保证互斥。
+#### 加锁方记录时间戳
+最简单的方式是在加锁方记录一个时间，解锁时判断是否超时，这样其实还是存在一个问题，就是如果还有1ms就要超时了，此时去delete还是有可能把别人的锁删掉，根本原因是由于判断和删除不是一个原子操作。
+#### 使用lua script
+我们可以在Redis的键值中记录锁的所有者，只有锁的所有者才能删除这个key，并且保证判断和删除是一个原子操作。
+Redis提供了执行lua script的功能，帮助我们实现这个原子操作，我们只需要在加锁时指定一个唯一值，并在解锁时使用如下lua script即可实现解锁操作。
+
+```
+if redis.call("get",KEYS[1]) == ARGV[1] then
+        return redis.call("del",KEYS[1])
+    else
+        return 0
+    end
+```
+### 一些细节
